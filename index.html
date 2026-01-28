@@ -1,0 +1,655 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Geometry Dash Style Platformer Editor + Triggers + Selection</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: sans-serif;
+      background: #111;
+      color: #eee;
+      display: flex;
+      height: 100vh;
+      overflow: hidden;
+    }
+    #sidebar {
+      width: 280px;
+      background: #181818;
+      border-right: 2px solid #333;
+      padding: 10px;
+      box-sizing: border-box;
+    }
+    #sidebar h2 {
+      margin-top: 0;
+      font-size: 18px;
+    }
+    #sidebar button {
+      margin: 4px 0;
+      width: 100%;
+      padding: 6px;
+      border: none;
+      cursor: pointer;
+      background: #333;
+      color: #eee;
+      font-size: 14px;
+    }
+    #sidebar button.active {
+      background: #0a84ff;
+    }
+    #sidebar .palette {
+      margin-top: 10px;
+    }
+    #sidebar .palette button {
+      width: 48%;
+      margin-right: 2%;
+    }
+    #sidebar .palette button:nth-child(2n) {
+      margin-right: 0;
+    }
+    #sidebar small {
+      display: block;
+      margin-top: 10px;
+      color: #aaa;
+      font-size: 11px;
+      line-height: 1.4;
+    }
+    #game-container {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #05070a;
+      position: relative;
+    }
+    canvas {
+      background: #000;
+      border: 2px solid #333;
+      image-rendering: pixelated;
+    }
+    #mode-indicator {
+      position: absolute;
+      top: 10px;
+      left: 50%;
+      transform: translateX(-50%);
+      padding: 4px 10px;
+      background: rgba(0,0,0,0.7);
+      border-radius: 4px;
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+  <div id="sidebar">
+    <h2>GD Style Editor</h2>
+    <button id="modeEditorBtn" class="active">Editor Mode</button>
+    <button id="modePlayBtn">Play Mode</button>
+
+    <div class="palette">
+      <h3>Palette</h3>
+      <button data-type="block" class="palette-btn active">Block</button>
+      <button data-type="jumpPad" class="palette-btn">Jump Pad</button>
+      <button data-type="start" class="palette-btn">Start Pos</button>
+      <button data-type="goal" class="palette-btn">Goal</button>
+      <button data-type="moveTrigger" class="palette-btn">Move Trigger</button>
+      <button data-type="spawnTrigger" class="palette-btn">Spawn Trigger</button>
+    </div>
+
+    <button id="clearBtn">Clear Level</button>
+    <small>
+      Editor:<br>
+      • Click empty grid: place current object.<br>
+      • Click existing object: select it (for move/rotate).<br>
+      • Selected: W/A/S/D to move by 1 cell, R to rotate (jump pads & start only).<br><br>
+      Triggers:<br>
+      • Move Trigger: prompts for target ID, moveX, moveY, duration (frames).<br>
+      • Spawn Trigger: prompts for teleport X/Y (grid coords).<br><br>
+      Play:<br>
+      • A/D or ←/→ to move, Space/↑/W to jump.<br>
+      • Jump Pad: launches based on rotation (up/right/down/left).<br>
+      • Start rotation: affects player facing direction at start.
+    </small>
+  </div>
+
+  <div id="game-container">
+    <div id="mode-indicator">Mode: Editor</div>
+    <canvas id="game" width="960" height="540"></canvas>
+  </div>
+
+  <script>
+    // --- Basic setup ---
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+
+    const GRID_SIZE = 30;
+    const COLS = Math.floor(canvas.width / GRID_SIZE);
+    const ROWS = Math.floor(canvas.height / GRID_SIZE);
+
+    // Level data
+    const tiles = []; // {id,x,y,type,rotation,...}
+    let nextID = 1;
+
+    let startPos = {
+      x: 2 * GRID_SIZE,
+      y: (ROWS - 3) * GRID_SIZE,
+      rotation: 0 // 0,90,180,270
+    };
+    let goalPos = {
+      x: (COLS - 4) * GRID_SIZE,
+      y: (ROWS - 3) * GRID_SIZE
+    };
+
+    // Modes
+    let mode = 'editor'; // 'editor' | 'play'
+    let currentType = 'block';
+
+    // Selection
+    // kind: 'tile' | 'start' | 'goal'
+    let selected = null;
+
+    // Player
+    const player = {
+      x: startPos.x,
+      y: startPos.y,
+      w: GRID_SIZE * 0.8,
+      h: GRID_SIZE * 0.8,
+      vx: 0,
+      vy: 0,
+      onGround: false,
+      facing: 1, // 1 = right, -1 = left
+      color: '#00e1ff'
+    };
+
+    const keys = {};
+
+    // Tweens for move triggers
+    const activeTweens = [];
+
+    // --- UI elements ---
+    const modeEditorBtn = document.getElementById('modeEditorBtn');
+    const modePlayBtn = document.getElementById('modePlayBtn');
+    const modeIndicator = document.getElementById('mode-indicator');
+    const clearBtn = document.getElementById('clearBtn');
+    const paletteButtons = document.querySelectorAll('.palette-btn');
+
+    modeEditorBtn.onclick = () => setMode('editor');
+    modePlayBtn.onclick = () => setMode('play');
+    clearBtn.onclick = () => {
+      tiles.length = 0;
+      nextID = 1;
+      startPos = {
+        x: 2 * GRID_SIZE,
+        y: (ROWS - 3) * GRID_SIZE,
+        rotation: 0
+      };
+      goalPos = {
+        x: (COLS - 4) * GRID_SIZE,
+        y: (ROWS - 3) * GRID_SIZE
+      };
+      selected = null;
+      resetPlayer();
+    };
+
+    paletteButtons.forEach(btn => {
+      btn.onclick = () => {
+        paletteButtons.forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        currentType = btn.dataset.type;
+      };
+    });
+
+    function setMode(newMode) {
+      mode = newMode;
+      if (mode === 'editor') {
+        modeEditorBtn.classList.add('active');
+        modePlayBtn.classList.remove('active');
+        modeIndicator.textContent = 'Mode: Editor';
+      } else {
+        modePlayBtn.classList.add('active');
+        modeEditorBtn.classList.remove('active');
+        modeIndicator.textContent = 'Mode: Play';
+        selected = null;
+        resetPlayer();
+      }
+    }
+
+    function resetPlayer() {
+      player.x = startPos.x;
+      player.y = startPos.y;
+      player.vx = 0;
+      player.vy = 0;
+      player.onGround = false;
+
+      // SP-1: facing direction from start rotation
+      const r = ((startPos.rotation % 360) + 360) % 360;
+      if (r === 0 || r === 90) player.facing = 1;
+      else player.facing = -1;
+    }
+
+    // --- Input handling ---
+    window.addEventListener('keydown', e => {
+      const key = e.key.toLowerCase();
+      keys[key] = true;
+
+      // Editor selection controls
+      if (mode === 'editor' && selected) {
+        if (['w','a','s','d','r'].includes(key)) {
+          e.preventDefault();
+          handleEditorSelectionKey(key);
+        }
+      }
+    });
+
+    window.addEventListener('keyup', e => {
+      keys[e.key.toLowerCase()] = false;
+    });
+
+    function handleEditorSelectionKey(key) {
+      if (!selected) return;
+
+      if (selected.kind === 'tile') {
+        const t = selected.ref;
+        if (key === 'w') t.y -= 1;
+        if (key === 's') t.y += 1;
+        if (key === 'a') t.x -= 1;
+        if (key === 'd') t.x += 1;
+        if (key === 'r' && t.type === 'jumpPad') {
+          t.rotation = ((t.rotation || 0) + 90) % 360;
+        }
+      } else if (selected.kind === 'start') {
+        if (key === 'w') startPos.y -= GRID_SIZE;
+        if (key === 's') startPos.y += GRID_SIZE;
+        if (key === 'a') startPos.x -= GRID_SIZE;
+        if (key === 'd') startPos.x += GRID_SIZE;
+        if (key === 'r') {
+          startPos.rotation = ((startPos.rotation || 0) + 90) % 360;
+        }
+      } else if (selected.kind === 'goal') {
+        if (key === 'w') goalPos.y -= GRID_SIZE;
+        if (key === 's') goalPos.y += GRID_SIZE;
+        if (key === 'a') goalPos.x -= GRID_SIZE;
+        if (key === 'd') goalPos.x += GRID_SIZE;
+      }
+    }
+
+    canvas.addEventListener('mousedown', e => {
+      if (mode !== 'editor') return;
+      const rect = canvas.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const my = e.clientY - rect.top;
+      const gx = Math.floor(mx / GRID_SIZE);
+      const gy = Math.floor(my / GRID_SIZE);
+
+      // Check selection first: start, goal, tiles
+      const startGX = Math.floor(startPos.x / GRID_SIZE);
+      const startGY = Math.floor(startPos.y / GRID_SIZE);
+      const goalGX = Math.floor(goalPos.x / GRID_SIZE);
+      const goalGY = Math.floor(goalPos.y / GRID_SIZE);
+
+      if (gx === startGX && gy === startGY) {
+        selected = { kind: 'start' };
+        return;
+      }
+      if (gx === goalGX && gy === goalGY) {
+        selected = { kind: 'goal' };
+        return;
+      }
+
+      const existing = tiles.find(t => Math.round(t.x) === gx && Math.round(t.y) === gy);
+      if (existing) {
+        selected = { kind: 'tile', ref: existing };
+        return;
+      }
+
+      // No existing object: place new based on palette
+      selected = null;
+
+      if (currentType === 'start') {
+        startPos.x = gx * GRID_SIZE;
+        startPos.y = gy * GRID_SIZE;
+        selected = { kind: 'start' };
+        return;
+      }
+      if (currentType === 'goal') {
+        goalPos.x = gx * GRID_SIZE;
+        goalPos.y = gy * GRID_SIZE;
+        selected = { kind: 'goal' };
+        return;
+      }
+
+      const tile = {
+        id: nextID++,
+        x: gx,
+        y: gy,
+        type: currentType,
+        rotation: 0,
+        targetID: null,
+        moveX: 0,
+        moveY: 0,
+        duration: 60,
+        targetX: null,
+        targetY: null
+      };
+
+      if (currentType === 'moveTrigger') {
+        const targetIDStr = prompt('Move Trigger: target object ID (number). You can see IDs in editor rendering.', '1');
+        const moveXStr = prompt('Move Trigger: moveX in grid cells (positive = right, negative = left).', '3');
+        const moveYStr = prompt('Move Trigger: moveY in grid cells (positive = down, negative = up).', '0');
+        const durationStr = prompt('Move Trigger: duration in frames (60 ≈ 1 second).', '60');
+
+        tile.targetID = parseInt(targetIDStr || '1', 10);
+        tile.moveX = parseInt(moveXStr || '0', 10);
+        tile.moveY = parseInt(moveYStr || '0', 10);
+        tile.duration = Math.max(1, parseInt(durationStr || '60', 10));
+      }
+
+      if (currentType === 'spawnTrigger') {
+        const txStr = prompt('Spawn Trigger: teleport X grid coordinate.', String(gx));
+        const tyStr = prompt('Spawn Trigger: teleport Y grid coordinate.', String(gy));
+        tile.targetX = parseInt(txStr || String(gx), 10) * GRID_SIZE;
+        tile.targetY = parseInt(tyStr || String(gy), 10) * GRID_SIZE;
+      }
+
+      tiles.push(tile);
+      selected = { kind: 'tile', ref: tile };
+    });
+
+    // --- Physics and collision ---
+    const GRAVITY = 0.6;
+    const MOVE_SPEED = 4;
+    const JUMP_FORCE = -11;
+    const JUMP_PAD_FORCE = 16; // magnitude; direction depends on rotation
+
+    function updatePlayer() {
+      let left = keys['a'] || keys['arrowleft'];
+      let right = keys['d'] || keys['arrowright'];
+      let jump = keys[' '] || keys['arrowup'] || keys['w'];
+
+      player.vx = 0;
+      if (left) player.vx -= MOVE_SPEED;
+      if (right) player.vx += MOVE_SPEED;
+
+      player.vy += GRAVITY;
+
+      if (jump && player.onGround) {
+        player.vy = JUMP_FORCE;
+        player.onGround = false;
+      }
+
+      moveAndCollide(player, player.vx, 0);
+      moveAndCollide(player, 0, player.vy);
+
+      if (aabbOverlap(
+        player.x, player.y, player.w, player.h,
+        goalPos.x, goalPos.y, GRID_SIZE, GRID_SIZE
+      )) {
+        resetPlayer();
+      }
+
+      checkTriggers();
+    }
+
+    function moveAndCollide(obj, dx, dy) {
+      obj.x += dx;
+      obj.y += dy;
+
+      obj.onGround = false;
+
+      for (const t of tiles) {
+        if (t.type === 'block' || t.type === 'jumpPad') {
+          const tx = Math.round(t.x * GRID_SIZE);
+          const ty = Math.round(t.y * GRID_SIZE);
+          const tw = GRID_SIZE;
+          const th = GRID_SIZE;
+
+          if (aabbOverlap(obj.x, obj.y, obj.w, obj.h, tx, ty, tw, th)) {
+            if (dx > 0) obj.x = tx - obj.w;
+            if (dx < 0) obj.x = tx + tw;
+            if (dy > 0) {
+              obj.y = ty - obj.h;
+              obj.vy = 0;
+              obj.onGround = true;
+
+              if (t.type === 'jumpPad') {
+                const r = ((t.rotation || 0) % 360 + 360) % 360;
+                if (r === 0) {
+                  obj.vy = -JUMP_PAD_FORCE;
+                } else if (r === 90) {
+                  obj.vx = JUMP_PAD_FORCE;
+                } else if (r === 180) {
+                  obj.vy = JUMP_PAD_FORCE;
+                } else if (r === 270) {
+                  obj.vx = -JUMP_PAD_FORCE;
+                }
+                obj.onGround = false;
+              }
+            }
+            if (dy < 0) {
+              obj.y = ty + th;
+              obj.vy = 0;
+            }
+          }
+        }
+      }
+    }
+
+    function aabbOverlap(x1, y1, w1, h1, x2, y2, w2, h2) {
+      return (
+        x1 < x2 + w2 &&
+        x1 + w1 > x2 &&
+        y1 < y2 + h2 &&
+        y1 + h1 > y2
+      );
+    }
+
+    // --- Trigger logic ---
+    function checkTriggers() {
+      for (const t of tiles) {
+        if (t.type !== 'moveTrigger' && t.type !== 'spawnTrigger') continue;
+
+        const tx = Math.round(t.x * GRID_SIZE);
+        const ty = Math.round(t.y * GRID_SIZE);
+
+        if (!aabbOverlap(player.x, player.y, player.w, player.h, tx, ty, GRID_SIZE, GRID_SIZE)) {
+          continue;
+        }
+
+        if (t.type === 'spawnTrigger') {
+          if (t.targetX != null && t.targetY != null) {
+            player.x = t.targetX;
+            player.y = t.targetY;
+            player.vx = 0;
+            player.vy = 0;
+            player.onGround = false;
+          }
+        }
+
+        if (t.type === 'moveTrigger') {
+          const target = tiles.find(o => o.id === t.targetID);
+          if (target) {
+            startMoveTween(
+              target,
+              t.moveX * GRID_SIZE,
+              t.moveY * GRID_SIZE,
+              t.duration
+            );
+          }
+        }
+      }
+    }
+
+    function startMoveTween(obj, dx, dy, duration) {
+      activeTweens.push({
+        obj,
+        startX: obj.x * GRID_SIZE,
+        startY: obj.y * GRID_SIZE,
+        dx,
+        dy,
+        duration,
+        time: 0
+      });
+    }
+
+    function updateTweens() {
+      for (let i = activeTweens.length - 1; i >= 0; i--) {
+        const t = activeTweens[i];
+        t.time++;
+
+        const p = t.time / t.duration;
+        if (p >= 1) {
+          const finalX = t.startX + t.dx;
+          const finalY = t.startY + t.dy;
+          t.obj.x = Math.round(finalX / GRID_SIZE);
+          t.obj.y = Math.round(finalY / GRID_SIZE);
+          activeTweens.splice(i, 1);
+          continue;
+        }
+
+        const curX = t.startX + t.dx * p;
+        const curY = t.startY + t.dy * p;
+        t.obj.x = curX / GRID_SIZE;
+        t.obj.y = curY / GRID_SIZE;
+      }
+    }
+
+    // --- Rendering ---
+    function drawGrid() {
+      ctx.strokeStyle = '#111';
+      ctx.lineWidth = 1;
+      for (let x = 0; x <= COLS; x++) {
+        ctx.beginPath();
+        ctx.moveTo(x * GRID_SIZE, 0);
+        ctx.lineTo(x * GRID_SIZE, canvas.height);
+        ctx.stroke();
+      }
+      for (let y = 0; y <= ROWS; y++) {
+        ctx.beginPath();
+        ctx.moveTo(0, y * GRID_SIZE);
+        ctx.lineTo(canvas.width, y * GRID_SIZE);
+        ctx.stroke();
+      }
+    }
+
+    function drawTiles() {
+      for (const t of tiles) {
+        const x = t.x * GRID_SIZE;
+        const y = t.y * GRID_SIZE;
+
+        if (t.type === 'block') {
+          ctx.fillStyle = '#444';
+          ctx.fillRect(x, y, GRID_SIZE, GRID_SIZE);
+          ctx.strokeStyle = '#777';
+          ctx.strokeRect(x, y, GRID_SIZE, GRID_SIZE);
+        } else if (t.type === 'jumpPad') {
+          ctx.save();
+          ctx.translate(x + GRID_SIZE / 2, y + GRID_SIZE / 2);
+          const r = ((t.rotation || 0) * Math.PI) / 180;
+          ctx.rotate(r);
+          ctx.translate(-GRID_SIZE / 2, -GRID_SIZE / 2);
+
+          ctx.fillStyle = '#00ff7f';
+          ctx.fillRect(0, 0, GRID_SIZE, GRID_SIZE);
+          ctx.strokeStyle = '#aaffcc';
+          ctx.strokeRect(0, 0, GRID_SIZE, GRID_SIZE);
+          ctx.strokeStyle = '#003322';
+          ctx.beginPath();
+          ctx.moveTo(4, GRID_SIZE - 4);
+          ctx.lineTo(GRID_SIZE / 2, 4);
+          ctx.lineTo(GRID_SIZE - 4, GRID_SIZE - 4);
+          ctx.stroke();
+
+          ctx.restore();
+        } else if (t.type === 'moveTrigger') {
+          ctx.fillStyle = '#ff66ff';
+          ctx.fillRect(x, y, GRID_SIZE, GRID_SIZE);
+          ctx.strokeStyle = '#ffffff';
+          ctx.strokeRect(x, y, GRID_SIZE, GRID_SIZE);
+          ctx.fillStyle = '#000';
+          ctx.font = '10px sans-serif';
+          ctx.fillText('M', x + 10, y + 18);
+        } else if (t.type === 'spawnTrigger') {
+          ctx.fillStyle = '#66ccff';
+          ctx.fillRect(x, y, GRID_SIZE, GRID_SIZE);
+          ctx.strokeStyle = '#ffffff';
+          ctx.strokeRect(x, y, GRID_SIZE, GRID_SIZE);
+          ctx.fillStyle = '#000';
+          ctx.font = '10px sans-serif';
+          ctx.fillText('S', x + 10, y + 18);
+        }
+
+        if (mode === 'editor') {
+          ctx.fillStyle = '#fff';
+          ctx.font = '9px monospace';
+          ctx.fillText(String(t.id), x + 2, y + 10);
+        }
+
+        if (selected && selected.kind === 'tile' && selected.ref === t) {
+          ctx.strokeStyle = '#0af';
+          ctx.lineWidth = 2;
+          ctx.strokeRect(x + 1, y + 1, GRID_SIZE - 2, GRID_SIZE - 2);
+        }
+      }
+    }
+
+    function drawStartAndGoal() {
+      // Start (rotatable)
+      ctx.save();
+      ctx.translate(startPos.x + GRID_SIZE / 2, startPos.y + GRID_SIZE / 2);
+      const r = ((startPos.rotation || 0) * Math.PI) / 180;
+      ctx.rotate(r);
+      ctx.translate(-GRID_SIZE / 2, -GRID_SIZE / 2);
+
+      ctx.fillStyle = '#0a84ff';
+      ctx.fillRect(0, 0, GRID_SIZE, GRID_SIZE);
+      ctx.fillStyle = '#fff';
+      ctx.font = '12px sans-serif';
+      ctx.fillText('S', 10, 20);
+
+      ctx.restore();
+
+      if (selected && selected.kind === 'start') {
+        ctx.strokeStyle = '#0af';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(startPos.x + 1, startPos.y + 1, GRID_SIZE - 2, GRID_SIZE - 2);
+      }
+
+      // Goal (no rotation)
+      ctx.fillStyle = '#ffcc00';
+      ctx.fillRect(goalPos.x, goalPos.y, GRID_SIZE, GRID_SIZE);
+      ctx.fillStyle = '#000';
+      ctx.font = '12px sans-serif';
+      ctx.fillText('G', goalPos.x + 10, goalPos.y + 20);
+
+      if (selected && selected.kind === 'goal') {
+        ctx.strokeStyle = '#0af';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(goalPos.x + 1, goalPos.y + 1, GRID_SIZE - 2, GRID_SIZE - 2);
+      }
+    }
+
+    function drawPlayer() {
+      ctx.fillStyle = player.color;
+      ctx.fillRect(player.x, player.y, player.w, player.h);
+    }
+
+    // --- Main loop ---
+    function loop() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      drawGrid();
+      updateTweens();
+      drawTiles();
+      drawStartAndGoal();
+
+      if (mode === 'play') {
+        updatePlayer();
+        drawPlayer();
+      }
+
+      requestAnimationFrame(loop);
+    }
+
+    loop();
+  </script>
+</body>
+</html>
